@@ -1,0 +1,600 @@
+---
+title: "Predicting the Proportion of Residents of Toronto Neighbourhoods with High Income - Data Analysis"
+author: "Gavin Pu"
+date: '2022-12-20'
+output: pdf_document
+---
+
+## Packages
+
+This analysis uses the following packages.
+
+```{r, echo=FALSE, eval=FALSE}
+# Run this code chunk manually to install the packages
+install.packages("car")
+install.packages("glmnet")
+install.packages("opendatatoronto")
+install.packages("rms")
+```
+
+```{r, message=FALSE}
+library(car)
+library(glmnet)
+library(opendatatoronto)
+library(rms)
+```
+
+## Dataset
+
+The original dataset can be found on the [\textcolor{blue}{City of Toronto’s Open Data Portal}](https://open.toronto.ca/dataset/neighbourhood-profiles/) and is freely licensed under the [\textcolor{blue}{Open Data License}](https://open.toronto.ca/open-data-license/). The [\textcolor{blue}{opendatatoronto}](https://github.com/sharlagelfand/opendatatoronto/) GitHub contains documentation on how to use the `opendatatoronto` package.
+
+```{r}
+# Read the dataset via the `opendatatoronto` package
+resources <- list_package_resources("6e19a90f-971c-46b3-852c-0c48c436d1fc")
+neighbourhood_profiles <- get_resource(resources[
+  resources$id == "f07fe8f0-fa24-4d68-8cb4-326e280b0b05", ])
+```
+
+```{r, echo=FALSE, eval=FALSE}
+# If the `opendatatoronto` package is not working, the code below can be run to
+# manually read the CSV file
+neighbourhood_profiles <- read.csv("neighbourhood-profiles-2016-140-model.csv")
+```
+
+## Data Cleaning
+
+Each variable has a unique row identifier in the `neighbourhood_profiles` data frame. There are five possible predictors that may be used to create the regression model.
+
+1. The first predictor is the proportion of individuals in a neighbourhood who have a university certificate, diploma, or degree at the bachelor level or above (row identifier 1710).
+2. The second predictor is the proportion of individuals in a neighbourhood whose occupation is management (row identifier 1923).
+3. The third predictor is the proportion of individuals in a neighbourhood who work in professional, scientific, or technical industires (row identifier 1947).
+4. The fourth predictor is the proportion of individuals in a neighbourhood who speak both English and French (row identifier 131).
+5. The fifth predictor is the portion of individuals in a neighbourhood who studied in a province or territory of Canada outside their original province or territory of residence (row identifier 1861).
+
+The response is the proportion of individuals in a neighbourhood who have an employment income of $100,000 or greater (row identifier 1017).
+
+For brevity, each predictor will henceforth be referred to as "predictor X", where X is the number in the above list. For example, predictor 1 is the proportion of individuals in a neighbourhood who have a university certificate, diploma, or degree at the bachelor level or above.
+
+```{r}
+# Get all neighbourhood names
+neighbourhoods <- colnames(neighbourhood_profiles[
+  7:ncol(neighbourhood_profiles)])
+
+# Extract the variables of interest from `neighbourhood_profiles`
+X_ids <- c(1710, 1923, 1947, 131, 1861, 1017)
+
+# Create a new data frame called `data`
+data <- data.frame(Neighbourhood = neighbourhoods)
+column_names <- c()
+
+# N = total number of individuals in the neighbourhood
+population_2016_X_id <- 3
+N <- neighbourhood_profiles[population_2016_X_id, 7:ncol(
+  neighbourhood_profiles)][1, ]
+N <- as.numeric(gsub(",", "", N))
+
+# Create each proportion and add it to `data`
+for (i in X_ids) {
+  column_names <- c(column_names, neighbourhood_profiles$Characteristic[i])
+  characteristic <- neighbourhood_profiles[i, 7:ncol(neighbourhood_profiles)][
+    1, ]
+  characteristic <- as.numeric(gsub(",", "", characteristic)) / N
+  data <- cbind(data, characteristic)
+}
+
+# Modify `data` so that the predictors are `data[1:5]`, the response is
+# `data[6]`, and the neighbourhood name is `data[7]`
+column_names <- c(column_names, "Neighbourhood")
+data <- cbind(data[2:ncol(data)], data[1])
+colnames(data) <- column_names
+
+# Assign shorthand names to each variable
+pred1 <- data[, 1]
+pred2 <- data[, 2]
+pred3 <- data[, 3]
+pred4 <- data[, 4]
+pred5 <- data[, 5]
+resp <- data[, 6]
+```
+
+## Functions
+
+These functions will be used later in the analysis.
+
+```{r}
+# Perform an SLR analysis
+# Precondition: `model` must be a linear model with one predictor
+SLR_analysis <- function(model) {
+  y <- model$model[[1]]
+  x <- model$model[[2]]
+  n <- nrow(data)
+  st_resid <- rstudent(model)
+  
+  # Find influential points
+  Di <- cooks.distance(model)
+  influential_points <- which(Di > 4 / (n - 2))
+  
+  # Create a SLR plot and highlight influential points
+  plot(y ~ x, main = "Simple Linear Regression",
+       col = ifelse(Di > 4 / (n - 2), "red", "black"))
+  abline(model$coefficients)
+  
+  # Create a standardized residuals versus fitted values plot and highlight
+  # influential points
+  plot(st_resid ~ model$fitted.values,
+       main = "Standardizd Residuals\nVersus Fitted Plot",
+       xlab = "Fitted Values", ylab = "Standardized Residuals",
+       col = ifelse(Di > 4 / (n - 2), "red", "black"))
+  abline(h = 0)
+  
+  # Create a Normal Q-Q plot
+  qqnorm(st_resid)
+  qqline(st_resid)
+  
+  # Perform an ANOVA test and calculate R-squared
+  ANOVA <- anova(model)
+  RSS <- ANOVA[2, 2]
+  SST <- ANOVA[1, 2] + ANOVA[2, 2]
+  R_squared <- 1 - (RSS / SST)
+  
+  # Return influential points, ANOVA, and R-squared
+  return(list(influential_points, ANOVA, R_squared))
+}
+```
+
+```{r}
+# Perform an MLR analysis
+# Precondition: `model` must be a linear model with more than one predictor
+MLR_analysis <- function(model) {
+  n <- nrow(data)
+  p <- length(model$model) - 1
+  st_resid <- rstudent(model)
+  
+  # Calculate the variance inflation factors (VIFs)
+  VIFs <- vif(model)
+  
+  # Find influential points
+  Di <- cooks.distance(model)
+  influential_points <- which(Di > qf(0.5, p + 1, n - p - 1))
+  
+  # Create a standardized residuals versus fitted values plot and highlight
+  # influential points
+  plot(st_resid ~ model$fitted.values,
+       main = "Standardizd Residuals\nVersus Fitted Plot",
+       xlab = "Fitted Values", ylab = "Standardized Residuals",
+       col = ifelse(Di > qf(0.5, p + 1, n - p - 1), "red", "black"))
+  abline(h = 0)
+  
+  # Create a Normal Q-Q plot
+  qqnorm(st_resid)
+  qqline(st_resid)
+  
+  # Validate the model using cross-validation
+  model_cv <- ols(model$terms, model = TRUE, x = TRUE, y = TRUE)
+  model_cv <- calibrate(model_cv, method = "crossvalidation", B = 10)
+
+  # Create a calibration plot
+  plot(model_cv, main = "Calibration Plot", xlab = "Predicted Response",
+       ylab = "Observed Response", subtitles = FALSE, legend = FALSE)
+  legend("bottomright", c("Apparent", "Bias-corrected", "Ideal"), 
+       lty = c(3, 1, 2), bty = "n", cex = 0.6)
+  
+  # Perform an ANOVA test and calculate adjusted R-squared
+  ANOVA <- anova(model)
+  RSS <- ANOVA[nrow(ANOVA), 2]
+  SST <- 0
+  for (i in 1:nrow(ANOVA)) {
+    SST <- SST + ANOVA[i, 2]
+  }
+  adjusted_R_squared <- 1 - ((RSS / (n - p - 1)) / (SST) / (n - 1))
+  
+  # Return VIFs, influential points, ANOVA, and adjusted R-squared
+  return(list(VIFs, influential_points, ANOVA, adjusted_R_squared))
+}
+```
+
+## Simple Linear Regression (SLR)
+
+### Predictor 1
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Create and analyze a SLR model with the response and predictor 1
+model1 <- lm(resp ~ pred1)
+model1_analysis <- SLR_analysis(model1)
+```
+
+The assumptions of linearity and homoscedasticity are violated because the standardized residuals curve upward slightly and show a cone-shaped pattern. A Box-Cox transformation may help satisfy the conditions of SLR.
+
+```{r, fig.height=2.5}
+# Perform a Box-Cox transformation
+powerTransform(lm(cbind(resp, pred1) ~ 1))
+
+# Taking the logarithm of the response and the square root of the predictor
+# may help the model satisfy the assumptions of SLR
+
+par(mfrow = c(1, 3))
+
+# Create and analyze an SLR model with the transformed response and transformed
+# predictor 1
+model1 <- lm(log(resp) ~ sqrt(pred1))
+model1_analysis <- SLR_analysis(model1)
+```
+
+The assumption of Normality of the errors may not be completely met since some points at the top right of the Normal Q-Q plot deviate from the line. Points coloured in red are influential points. To examine the effects of the 3 influential points, the model will be refit without them.
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Refit a model without influential points
+influential_points <- as.numeric(names(model1_analysis[[1]]))
+model1_rm_influential <- lm(log(resp[-influential_points]) ~
+                              sqrt(pred1[-influential_points]))
+model1_rm_influential_analysis <- SLR_analysis(model1_rm_influential)
+
+# Compare the coefficients
+model1$coefficients
+model1_rm_influential$coefficients
+```
+
+The influential points have a small effect on the regression coefficients.
+
+```{r}
+# ANOVA results
+model1_analysis[[2]][1, 5]
+
+# R-squared
+model1_analysis[[3]]
+```
+
+The $p$-value for the ANOVA test is extremely low and $R^2$ is moderately high, so this model can be kept. 
+
+### Predictor 2
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Create and analyze an LR model with the response and predictor 2
+model2 <- lm(resp ~ pred2)
+model2_analysis <- SLR_analysis(model2)
+```
+
+The assumptions of linearity and homoscedasticity are violated because the standardized residuals curve upward slightly and show a cone-shaped pattern. A Box-Cox transformation may help satisfy the conditions of SLR.
+
+```{r, fig.height=2.5}
+# Perform a Box-Cox transformation
+powerTransform(lm(cbind(resp, pred2) ~ 1))
+
+# Taking the logarithm of both the response and the predictor may help the
+# model satisfy the assumptions of SLR
+
+par(mfrow = c(1, 3))
+
+# Create and analyze an SLR model with the transformed response and transformed
+# predictor 2
+model2 <- lm(log(resp) ~ log(pred2))
+model2_analysis <- SLR_analysis(model2)
+```
+
+Points coloured in red are influential points. Of the influential points that appear, there seem to be a few bad leverage points. Comparing this model to a modified version that removes the influential points can determine how dramatically the influential points change the least squares estimates.
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Refit a model without influential points
+influential_points <- as.numeric(names(model2_analysis[[1]]))
+model2_rm_influential <- lm(log(resp[-influential_points]) ~
+                              log(pred2[-influential_points]))
+model2_rm_influential_analysis <- SLR_analysis(model2_rm_influential)
+
+# Compare the coefficients
+model2$coefficients
+model2_rm_influential$coefficients
+```
+
+This model may not be the best because the influential points impact the least squares estimates, especially the intercept.
+
+```{r}
+# ANOVA p-value
+model2_analysis[[2]][1, 5]
+
+# R-squared
+model2_analysis[[3]]
+```
+
+Nonetheless, the $p$-value for the ANOVA test is extremely low and $R^2$ is very high.
+
+### Predictor 3
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Create and analyze an SLR model with the response and predictor 3
+model3 <- lm(resp ~ pred3)
+model3_analysis <- SLR_analysis(model3)
+```
+
+The untransformed model using predictor 3 displays the same problems as the previous two models, so a Box-Cox transformation may help satisfy the linearity and homoscedasticity assumptions.
+
+```{r, fig.height=2.5}
+# Perform a Box-Cox transformation
+powerTransform(lm(cbind(resp, pred3) ~ 1))
+
+# Taking the logarithm of both the response and the predictor may help the
+# model satisfy the assumptions of SLR
+
+par(mfrow = c(1, 3))
+
+# Create and analyze an SLR model with the transformed response and transformed
+# predictor 3
+model3 <- lm(log(resp) ~ log(pred3))
+model3_analysis <- SLR_analysis(model3)
+```
+
+This model can be compared to the same model without influential points to find out how much the regression coefficients are affected.
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Refit a model without influential points
+influential_points <- as.numeric(names(model3_analysis[[1]]))
+model3_rm_influential <- lm(log(resp[-influential_points]) ~
+                              log(pred3[-influential_points]))
+model3_rm_influential_analysis <- SLR_analysis(model3_rm_influential)
+
+# Compare the coefficients
+model3$coefficients
+model3_rm_influential$coefficients
+```
+
+The influential points have a strong effect on the intercept.
+
+```{r}
+# ANOVA p-value
+model3_analysis[[2]][1, 5]
+
+# R-squared
+model3_analysis[[3]]
+```
+
+The $p$-value for the ANOVA test is extremely low, and $R^2$ is relatively high.
+
+### Predictor 4
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Create and analyze an SLR model with the response and predictor 4
+model4 <- lm(resp ~ pred4)
+model4_analysis <- SLR_analysis(model4)
+```
+
+A Box-Cox transformation can remedy the slight violation of linearity and the violation of homoscedasticity.
+
+```{r, fig.height=2.5}
+# Perform a Box-Cox transformation
+powerTransform(lm(cbind(resp, pred4) ~ 1))
+
+# Taking the logarithm of both the response and the predictor may help the
+# model satisfy the assumptions of SLR
+
+par(mfrow = c(1, 3))
+
+# Create and analyze an SLR model with the transformed response and transformed
+# predictor 4
+model4 <- lm(log(resp) ~ log(pred4))
+model4_analysis <- SLR_analysis(model4)
+```
+
+There appear to be three or four high leverage points. The other influential points could be classified as outliers.
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Refit a model without influential points
+influential_points <- as.numeric(names(model4_analysis[[1]]))
+model4_rm_influential <- lm(log(resp[-influential_points]) ~
+                              log(pred4[-influential_points]))
+model4_rm_influential_analysis <- SLR_analysis(model4_rm_influential)
+
+# Compare the coefficients
+model4$coefficients
+model4_rm_influential$coefficients
+```
+
+The model is relatively unaffected by the presence influential points.
+
+```{r}
+# ANOVA p-value
+model4_analysis[[2]][1, 5]
+
+# R-squared
+model4_analysis[[3]]
+```
+
+The $p$-value for the ANOVA test is extremely low, and $R^2$ is high.
+
+### Predictor 5
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Create and analyze an SLR model with the response and predictor 5
+model5 <- lm(resp ~ pred5)
+model5_analysis <- SLR_analysis(model5)
+```
+
+Like the other predictors, a Box-Cox transformation could allow the model to better satisfy the conditions of SLR.
+
+```{r, fig.height=2.5}
+# Perform a Box-Cox transformation
+powerTransform(lm(cbind(resp, pred5) ~ 1))
+
+# Taking the logarithm of both the response and the predictor may help the
+# model satisfy the assumptions of SLR
+
+par(mfrow = c(1, 3))
+
+# Create and analyze an SLR model with the transformed response and transformed
+# predictor 5
+model5 <- lm(log(resp) ~ log(pred5))
+model5_analysis <- SLR_analysis(model5)
+```
+
+The point at the top right seems to be a bad leverage point. The other influential points could be classified as outliers.
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Refit a model without influential points
+influential_points <- as.numeric(names(model5_analysis[[1]]))
+model5_rm_influential <- lm(log(resp[-influential_points]) ~
+                              log(pred5[-influential_points]))
+model5_rm_influential_analysis <- SLR_analysis(model5_rm_influential)
+
+# Compare the coefficients
+model5$coefficients
+model5_rm_influential$coefficients
+```
+
+The intercept changed considerably while the slope increased slightly after influential points were removed. There may be other models that are not as affected by influential points.
+
+```{r}
+# ANOVA p-value
+model5_analysis[[2]][1, 5]
+
+# R-squared
+model5_analysis[[3]]
+```
+
+The $p$-value for the ANOVA test is extremely low, and $R^2$ is moderately high.
+
+### Summary
+
+`model1` does not appear to have influential points as bad as those in other models. However, its $R^2$ is lower than those of other models, and its errors may not be entirely Normal.
+
+`model2` has a few bad leverage points that change the least squares estimates. Its $R^2$ is the highest of all the SLR models, however.
+
+`model3` has influential points that affect the intercept significantly. Its $R^2$ is reasonably high.
+
+The least squares estimates of `model4` do not change much after influential points are removed. Again, its $R^2$ value is reasonably high.
+
+`model5` has bad leverage points that mostly impact the intercept. Its $R^2$ is similar to those of the previous two models.
+
+The $p$-values for all ANOVA tests indicate that there is strong evidence against the null hypothesis that $H_0 : \beta_1 = 0$.
+
+```{r}
+# Means and standard deviations of transformed variables
+c(mean(sqrt(pred1)), sd(sqrt(pred1)))
+c(mean(log(pred2)), sd(log(pred2)))
+c(mean(log(pred3)), sd(log(pred3)))
+c(mean(log(pred4)), sd(log(pred4)))
+c(mean(log(pred5)), sd(log(pred5)))
+c(mean(log(resp)), sd(log(resp)))
+```
+
+## Multiple Linear Regression (MLR)
+
+### Variable Selection
+
+First, an MLR model must be fit using all predictors.
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Create and analyze an MLR model with the response and all 5 predictors
+model12345 <- lm(resp ~ pred1 + pred2 + pred3 + pred4 + pred5)
+model12345_analysis <- MLR_analysis(model12345)
+```
+
+This model must be transformed and refit because it violates the assumptions of linearity, homoscedasticity, independence of errors, and Normality of errors.
+
+```{r, fig.height=2.5}
+# Perform a Box-Cox transformation
+powerTransform(lm(cbind(resp, pred1, pred2, pred3, pred4, pred5) ~ 1))
+
+# The Box-Cox transformation suggests to use `log(resp)`, 'sqrt(pred1)`,
+# `log(pred2)`, `log(pred3)`, `log(pred4)`, and `log(pred5)`
+
+# This matches the transformations used in SLR
+
+par(mfrow = c(1, 3))
+
+# Create and analyze an MLR model with all 5 predictors
+model12345 <- lm(log(resp) ~ sqrt(pred1) + log(pred2) + log(pred3) + log(pred4)
+                 + log(pred5))
+model12345_analysis <- MLR_analysis(model12345)
+```
+
+The transformed model now satisfies all assumptions of MLR. To select the model, stepwise selection can be performed using the AIC and BIC.
+
+```{r}
+# Use the AIC to select predictors
+modelAIC <- step(model12345, direction = "both", trace = 0, k = 2)
+modelAIC$call
+
+# Use the BIC to select predictors
+n <- nrow(data)
+modelBIC <- step(model12345, direction = "both", trace = 0, k = log(n))
+modelBIC$call
+```
+
+The model with the smallest AIC uses the transformed versions of predictors 1, 2, and 4. Meanwhile, the model with the smallest BIC only uses predictors 1 and 2.
+
+The original model can also be shrunk using LASSO to select another potential model.
+
+```{r}
+set.seed(8249)
+
+# Use LASSO to select predictors
+pred_matrix <- cbind(sqrt(pred1), log(pred2), log(pred3), log(pred4),
+                     log(pred5))
+modelLASSO <- glmnet::cv.glmnet(pred_matrix, log(resp))
+modelLASSO <- coef(modelLASSO, s = "lambda.1se")
+```
+
+LASSO has selected the model with predictors 1, 2, and 4, which is the same model found using stepwise selection with the AIC.
+
+### Predictors 1 and 2
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Create and analyze an MLR model
+model12 <- lm(log(resp) ~ sqrt(pred1) + log(pred2))
+model12_analysis <- MLR_analysis(model12)
+
+# Get VIFs
+model12_analysis[[1]]
+
+# Get all influential points
+model12_analysis[[2]]
+
+# ANOVA p-values
+model12_analysis[[3]][5]
+
+# Adjusted R-squared
+model12_analysis[[4]]
+```
+
+Both VIFs are less than 5. Using Cook's distance, no influential points were found. The calibration plot shows that the observed probabilities largely match the predicted probabilities. From the ANOVA result, all predictors are significant, and $R^2_{adj}$ is high.
+
+### Predictors 1, 2, and 4
+
+```{r, fig.height=2.5}
+par(mfrow = c(1, 3))
+
+# Create and analyze an MLR model
+model124 <- lm(log(resp) ~ sqrt(pred1) + log(pred2) + log(pred4))
+model124_analysis <- MLR_analysis(model124)
+
+# Get VIFs
+model124_analysis[[1]]
+```
+
+Two of the three VIFs are greater than 5, so this model will not be considered due to the presence of multicollinearity.
+
+### Summary
+
+`model124` had the smallest AIC while `model12` had the smallest BIC. However, `model124` exhibited multicollinearity while `model12` did not. Hence, `model12` appears to be the best MLR model.
