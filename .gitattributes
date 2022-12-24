@@ -1,2 +1,2 @@
-# Classify `.Rmd` files as R
-*.Rmd linguist-language=R
+# Detect `.Rmd` files
+*.Rmd linguist-detectable
