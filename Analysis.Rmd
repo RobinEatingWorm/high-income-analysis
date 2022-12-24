@@ -26,7 +26,7 @@ library(rms)
 
 ## Dataset
 
-The original dataset can be found on the [\textcolor{blue}{City of Toronto’s Open Data Portal}](https://open.toronto.ca/dataset/neighbourhood-profiles/) and is freely licensed under the [\textcolor{blue}{Open Data License}](https://open.toronto.ca/open-data-license/). The [\textcolor{blue}{opendatatoronto}](https://github.com/sharlagelfand/opendatatoronto/) GitHub contains documentation on how to use the `opendatatoronto` package.
+The original dataset can be found on the [\textcolor{blue}{City of Toronto’s Open Data Portal}](https://open.toronto.ca/dataset/neighbourhood-profiles/) and is licensed under the [\textcolor{blue}{Open Government Licence – Toronto}](https://open.toronto.ca/open-data-license/). The [\textcolor{blue}{opendatatoronto}](https://github.com/sharlagelfand/opendatatoronto/) GitHub contains documentation on how to use the `opendatatoronto` package.
 
 ```{r}
 # Read the dataset via the `opendatatoronto` package
